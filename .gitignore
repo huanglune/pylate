@@ -152,6 +152,11 @@ output/
 evaluation_datasets/
 ./datasets/
 
+# experiments data (raw datasets, embedding caches, benchmark results)
+experiments/data/evaluation_datasets/
+experiments/data/embeddings_cache/
+experiments/results/
+
 *.csv
 *.sqlite
 *.voy
