@@ -1,15 +1,25 @@
 """Run benchmark evaluation with configurable index backends and datasets.
 
 Supports both BEIR and LoTTE datasets. Dataset names are auto-detected:
-BEIR names (scifact, nfcorpus, ...) go through beir_datasets,
-LoTTE names (lifestyle_search, science_forum, ...) go through lotte_datasets.
-See beir_datasets.py and lotte_datasets.py for full dataset tables.
+BEIR names (scifact, nfcorpus, ...) go through data/beir.py,
+LoTTE names (lifestyle_search, science_forum, ...) go through data/lotte.py.
+See data/beir.py and data/lotte.py for full dataset tables with sizes.
 
 Usage:
-    python run_beir_benchmark.py                                       # default
-    python run_beir_benchmark.py --index plaid warp                    # multiple indexes
-    python run_beir_benchmark.py --datasets scifact lifestyle_search   # mix BEIR + LoTTE
-    python run_beir_benchmark.py --index warp --datasets scifact nfcorpus
+    uv run run_beir_benchmark.py                                       # default: plaid+warp × scifact+nfcorpus
+    uv run run_beir_benchmark.py --index plaid warp                    # multiple indexes
+    uv run run_beir_benchmark.py --index plaid                         # single index
+    uv run run_beir_benchmark.py --datasets scifact lifestyle_search   # mix BEIR + LoTTE
+    uv run run_beir_benchmark.py --override                            # force rebuild indexes
+    uv run run_beir_benchmark.py --index warp --datasets scifact --override
+
+Options:
+    --index      Index backends to benchmark (default: plaid warp)
+    --datasets   Datasets to evaluate (default: scifact nfcorpus)
+    --dtype      Embedding cache precision: fp16 or fp32 (default: fp16)
+    --device     GPU for encoding, e.g. cuda:0, cuda:1 (default: auto)
+    --batch-size Batch size for document encoding (default: 256)
+    --override   Force rebuild index even if it already exists (default: reuse)
 
 Available indexes:
     plaid       IVF+PQ, centroid interaction (CIKM 2022). Retriever: ColBERT MaxSim.
@@ -30,6 +40,7 @@ import argparse
 import json
 import os
 import time
+from datetime import datetime
 
 import numpy as np
 from pylate import evaluation, indexes, retrieve
@@ -44,22 +55,26 @@ METRICS = [
     "hits@1", "hits@5", "hits@10",
 ]
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
+INDEX_DIR = os.path.join(os.path.dirname(__file__), "data", "indexes")
 
 
 def build_index_and_retriever(
-    index_type: str, dataset_name: str,
+    index_type: str, dataset_name: str, override: bool = True, dtype: str = "fp16",
 ) -> tuple:
+    index_name = f"benchmark_{dataset_name}_{index_type}_{dtype}"
     if index_type == "plaid":
         index = indexes.PLAID(
-            override=True,
-            index_name=f"benchmark_{dataset_name}_plaid",
+            index_folder=INDEX_DIR,
+            index_name=index_name,
+            override=override,
             show_progress=False,
         )
         retriever = retrieve.ColBERT(index=index)
     elif index_type == "warp":
         index = indexes.WARP(
-            override=True,
-            index_name=f"benchmark_{dataset_name}_warp",
+            index_folder=INDEX_DIR,
+            index_name=index_name,
+            override=override,
             show_progress=False,
         )
         retriever = retrieve.XTR(index=index)
@@ -68,15 +83,24 @@ def build_index_and_retriever(
     return index, retriever
 
 
-def run_single_dataset(dataset_name: str, index_type: str) -> dict:
+def run_single_dataset(
+    dataset_name: str,
+    index_type: str,
+    override: bool = True,
+    dtype: str = "fp16",
+    device: str | None = None,
+    batch_size: int = 256,
+) -> dict:
     print(f"\n{'='*60}")
-    print(f"  Dataset: {dataset_name}  |  Index: {index_type.upper()}")
+    print(f"  Dataset: {dataset_name}  |  Index: {index_type.upper()}  |  dtype: {dtype}")
     print(f"{'='*60}")
 
-    ds = load_dataset(dataset_name)
+    ds = load_dataset(dataset_name, dtype=dtype, device=device, batch_size=batch_size)
     print(ds)
 
-    index, retriever = build_index_and_retriever(index_type, dataset_name)
+    if override:
+        print(f"  WARNING: Index will be rebuilt for {dataset_name} ({index_type.upper()})")
+    index, retriever = build_index_and_retriever(index_type, dataset_name, override, dtype)
 
     print(f"[1/3] Building {index_type.upper()} index...")
     t0 = time.perf_counter()
@@ -154,6 +178,22 @@ def main():
         "--datasets", nargs="+", default=["scifact", "nfcorpus"],
         help="Datasets to evaluate, supports both BEIR and LoTTE names (default: scifact nfcorpus)",
     )
+    parser.add_argument(
+        "--dtype", type=str, default="fp16", choices=["fp16", "fp32"],
+        help="Embedding cache precision (default: fp16)",
+    )
+    parser.add_argument(
+        "--device", type=str, default=None,
+        help="GPU for encoding, e.g. cuda:0, cuda:1 (default: auto)",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=256,
+        help="Batch size for document encoding (default: 256)",
+    )
+    parser.add_argument(
+        "--override", action="store_true", default=False,
+        help="Rebuild index even if it already exists (default: reuse existing)",
+    )
     args = parser.parse_args()
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -162,12 +202,22 @@ def main():
     for idx_type in args.index:
         for name in args.datasets:
             key = f"{name}/{idx_type}"
-            all_results[key] = run_single_dataset(name, idx_type)
+            all_results[key] = run_single_dataset(
+                name, idx_type, args.override, args.dtype, args.device, args.batch_size,
+            )
 
-    output_path = os.path.join(RESULTS_DIR, "benchmark.json")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    idx_str = "+".join(args.index)
+    ds_str = "+".join(args.datasets)
+    filename = f"benchmark_{idx_str}_{ds_str}_{args.dtype}_{timestamp}.json"
+    output_path = os.path.join(RESULTS_DIR, filename)
     with open(output_path, "w") as f:
         json.dump(all_results, f, indent=2)
+    latest_path = os.path.join(RESULTS_DIR, "benchmark_latest.json")
+    with open(latest_path, "w") as f:
+        json.dump(all_results, f, indent=2)
     print(f"\nResults saved to {output_path}")
+    print(f"Latest copy at  {latest_path}")
 
     print(f"\n{'='*60}")
     print("  Summary")

@@ -12,26 +12,27 @@ Usage:
     # ds.qrels:            dict[query_id -> {doc_id: relevance}]
 
 Available datasets (doc_length=300, ~200 tokens/doc avg):
-    Name              Split  Queries    Corpus   Data   Est.Vectors  Encode   q_len
+    Name              Split  Queries    Corpus   Data   Est.Vectors  Encode.fp16  q_len
     ─────────────────────────────────────────────────────────────────────────────────
-    nfcorpus          test       323      3,633    9MB        0.9M   0.4GB      32
-    scifact           test       300      5,183    8MB        1.2M   0.6GB      48
-    arguana           test     1,406      8,670   12MB        1.7M   0.8GB      64
-    scidocs           test     1,000     25,000  251MB          5M   2.4GB      48
-    fiqa              test       648     57,000   55MB         11M   5.6GB      32
-    trec-covid        test        50    171,000  195MB         34M    17GB      48
-    webis-touche2020  test        49    382,000  380MB         76M    37GB      32
-    quora             test    10,000    523,000  210MB        105M    51GB      32
-    nq                test     3,452  2,680,000  1.6GB       536M   262GB      32
-    dbpedia-entity    test       400  4,630,000  1.8GB       926M   453GB      32
-    hotpotqa          test     7,405  5,230,000  4.9GB      1.05B   512GB      32
-    fever             test     6,666  5,420,000  3.9GB      1.08B   528GB      32
-    climate-fever     test     1,535  5,420,000  3.9GB      1.08B   528GB      64
-    msmarco           dev      6,980  8,840,000  7.3GB      1.77B   864GB      32
+    nfcorpus          test       323      3,633    9MB        0.9M   0.2GB      32
+    scifact           test       300      5,183    8MB        1.2M   0.3GB      48
+    arguana           test     1,406      8,670   12MB        1.7M   0.4GB      64
+    scidocs           test     1,000     25,000  251MB          5M   1.2GB      48
+    fiqa              test       648     57,000   55MB         11M   2.8GB      32
+    trec-covid        test        50    171,000  195MB         34M   8.5GB      48
+    webis-touche2020  test        49    382,000  380MB         76M  18.5GB      32
+    quora             test    10,000    523,000  210MB        105M  25.5GB      32
+    nq                test     3,452  2,680,000  1.6GB       536M   131GB      32
+    dbpedia-entity    test       400  4,630,000  1.8GB       926M   227GB      32
+    hotpotqa          test     7,405  5,230,000  4.9GB      1.05B   256GB      32
+    fever             test     6,666  5,420,000  3.9GB      1.08B   264GB      32
+    climate-fever     test     1,535  5,420,000  3.9GB      1.08B   264GB      64
+    msmarco           dev      6,980  8,840,000  7.3GB      1.77B   432GB      32
 
     Data   = raw dataset download size (corpus + queries + qrels).
     Est.Vectors = Corpus × ~200 tokens/doc (each token = one 128d vector).
-    Encode = estimated embedding cache size after encoding (vectors × 128d × float32).
+    Encode.fp16 = estimated embedding cache size at fp16 (vectors × 128d × 2 bytes).
+                  fp32 = 2× this value.
 """
 
 from __future__ import annotations
@@ -102,8 +103,8 @@ class BEIRDataset:
         )
 
 
-def _get_cache_dir(dataset_name: str, model_name: str, cache_root: str) -> str:
-    return _cache_dir(dataset_name, model_name, cache_root)
+def _get_cache_dir(dataset_name: str, model_name: str, cache_root: str, dtype: str = "fp16") -> str:
+    return _cache_dir(dataset_name, model_name, cache_root, dtype=dtype)
 
 
 def _load_raw(dataset_name: str, config: dict) -> tuple[list, dict, dict]:
@@ -144,26 +145,33 @@ def _encode(
     model_name: str,
     query_length: int,
     doc_length: int,
+    device: str | None = None,
+    batch_size: int = 256,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Encode documents and queries with ColBERT model."""
     from pylate import models
+
+    kwargs = {}
+    if device is not None:
+        kwargs["device"] = device
 
     model = models.ColBERT(
         model_name_or_path=model_name,
         document_length=doc_length,
         query_length=query_length,
+        **kwargs,
     )
 
     doc_embeddings = model.encode(
         sentences=[doc["text"] for doc in documents],
-        batch_size=256,
+        batch_size=batch_size,
         is_query=False,
         show_progress_bar=True,
     )
 
     query_embeddings = model.encode(
         sentences=list(queries.values()),
-        batch_size=32,
+        batch_size=min(batch_size, 64),
         is_query=True,
         show_progress_bar=True,
     )
@@ -177,6 +185,9 @@ def load(
     doc_length: int = DEFAULT_DOC_LENGTH,
     cache_dir: str = DEFAULT_CACHE_DIR,
     force_encode: bool = False,
+    dtype: str = "fp16",
+    device: str | None = None,
+    batch_size: int = 256,
 ) -> BEIRDataset:
     """Load a BEIR dataset with cached embeddings.
 
@@ -194,6 +205,12 @@ def load(
         Directory for embedding cache files.
     force_encode
         If True, re-encode even if cache exists.
+    dtype
+        Storage precision: "fp16" or "fp32".
+    device
+        Device for encoding (e.g. "cuda:0", "cuda:1"). None = auto-detect.
+    batch_size
+        Batch size for document encoding. Query batch size = min(batch_size, 64).
     """
     if dataset_name not in DATASET_CONFIGS:
         raise ValueError(
@@ -203,21 +220,22 @@ def load(
 
     config = DATASET_CONFIGS[dataset_name]
     os.makedirs(cache_dir, exist_ok=True)
-    cache_path = _get_cache_dir(dataset_name, model_name, cache_dir)
+    cache_path = _get_cache_dir(dataset_name, model_name, cache_dir, dtype)
 
     documents, queries, qrels = _load_raw(dataset_name, config)
     doc_ids = [doc["id"] for doc in documents]
     query_ids = list(queries.keys())
 
     if not force_encode and cache_exists(cache_path):
-        print(f"[beir] Loading cached embeddings: {cache_path}")
+        print(f"[beir] Loading cached embeddings ({dtype}): {cache_path}")
         doc_embeddings, query_embeddings = load_embeddings(cache_path)
     else:
-        print(f"[beir] Encoding {dataset_name} with {model_name} ...")
+        print(f"[beir] Encoding {dataset_name} with {model_name} ({dtype}) on {device or 'auto'} ...")
         doc_embeddings, query_embeddings = _encode(
             documents, queries, model_name, config["query_length"], doc_length,
+            device=device, batch_size=batch_size,
         )
-        save_embeddings(cache_path, doc_embeddings, query_embeddings)
+        save_embeddings(cache_path, doc_embeddings, query_embeddings, dtype)
         print(f"[beir] Cached to {cache_path}")
 
     return BEIRDataset(

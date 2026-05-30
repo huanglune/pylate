@@ -11,22 +11,23 @@ Usage:
     # Same interface as beir_datasets.BEIRDataset
 
 Available datasets (from HuggingFace mteb/LoTTE, doc_length=300, ~200 tokens/doc avg):
-    Name                  Queries    Corpus    Data   Est.Vectors  Encode   q_len
+    Name                  Queries    Corpus    Data   Est.Vectors  Encode.fp16  q_len
     ─────────────────────────────────────────────────────────────────────────────────
-    lifestyle_search        1,080    388,000  ~400MB         78M    38GB      32
-    lifestyle_forum         4,080    388,000  ~400MB         78M    38GB      32
-    recreation_search       1,490    430,000  ~450MB         86M    42GB      32
-    recreation_forum        4,000    430,000  ~450MB         86M    42GB      32
-    writing_search          1,570    477,000  ~500MB         95M    46GB      32
-    writing_forum           4,000    477,000  ~500MB         95M    46GB      32
-    science_search          1,160  2,040,000  ~2.1GB        408M   199GB      32
-    science_forum           4,030  2,040,000  ~2.1GB        408M   199GB      32
-    technology_search       1,510  1,910,000  ~2.0GB        382M   187GB      32
-    technology_forum        4,010  1,910,000  ~2.0GB        382M   187GB      32
+    lifestyle_search        1,080    388,000  ~400MB         78M    19GB      32
+    lifestyle_forum         4,080    388,000  ~400MB         78M    19GB      32
+    recreation_search       1,490    430,000  ~450MB         86M    21GB      32
+    recreation_forum        4,000    430,000  ~450MB         86M    21GB      32
+    writing_search          1,570    477,000  ~500MB         95M    23GB      32
+    writing_forum           4,000    477,000  ~500MB         95M    23GB      32
+    science_search          1,160  2,040,000  ~2.1GB        408M   100GB      32
+    science_forum           4,030  2,040,000  ~2.1GB        408M   100GB      32
+    technology_search       1,510  1,910,000  ~2.0GB        382M    93GB      32
+    technology_forum        4,010  1,910,000  ~2.0GB        382M    93GB      32
 
     Data   = estimated HuggingFace download size.
     Est.Vectors = Corpus × ~200 tokens/doc (each token = one 128d vector).
-    Encode = estimated embedding cache size after encoding (vectors × 128d × float32).
+    Encode.fp16 = estimated embedding cache size at fp16 (vectors × 128d × 2 bytes).
+                  fp32 = 2× this value.
     Same domain shares corpus: search/forum only differ in queries.
 """
 
@@ -93,8 +94,8 @@ class LoTTEDataset:
         )
 
 
-def _get_cache_dir(dataset_name: str, model_name: str, cache_root: str) -> str:
-    return _cache_dir(dataset_name, model_name, cache_root, prefix="lotte_")
+def _get_cache_dir(dataset_name: str, model_name: str, cache_root: str, dtype: str = "fp16") -> str:
+    return _cache_dir(dataset_name, model_name, cache_root, prefix="lotte_", dtype=dtype)
 
 
 def _load_raw(config: dict) -> tuple[list, dict, dict]:
@@ -152,26 +153,33 @@ def _encode(
     model_name: str,
     query_length: int,
     doc_length: int,
+    device: str | None = None,
+    batch_size: int = 256,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Encode documents and queries with ColBERT model."""
     from pylate import models
+
+    kwargs = {}
+    if device is not None:
+        kwargs["device"] = device
 
     model = models.ColBERT(
         model_name_or_path=model_name,
         document_length=doc_length,
         query_length=query_length,
+        **kwargs,
     )
 
     doc_embeddings = model.encode(
         sentences=[doc["text"] for doc in documents],
-        batch_size=256,
+        batch_size=batch_size,
         is_query=False,
         show_progress_bar=True,
     )
 
     query_embeddings = model.encode(
         sentences=list(queries.values()),
-        batch_size=32,
+        batch_size=min(batch_size, 64),
         is_query=True,
         show_progress_bar=True,
     )
@@ -185,6 +193,9 @@ def load(
     doc_length: int = DEFAULT_DOC_LENGTH,
     cache_dir: str = DEFAULT_CACHE_DIR,
     force_encode: bool = False,
+    dtype: str = "fp16",
+    device: str | None = None,
+    batch_size: int = 256,
 ) -> LoTTEDataset:
     """Load a LoTTE dataset with cached embeddings.
 
@@ -200,6 +211,12 @@ def load(
         Directory for embedding cache files.
     force_encode
         If True, re-encode even if cache exists.
+    dtype
+        Storage precision: "fp16" or "fp32".
+    device
+        Device for encoding (e.g. "cuda:0", "cuda:1"). None = auto-detect.
+    batch_size
+        Batch size for document encoding. Query batch size = min(batch_size, 64).
     """
     if dataset_name not in DATASET_CONFIGS:
         raise ValueError(
@@ -209,21 +226,22 @@ def load(
 
     config = DATASET_CONFIGS[dataset_name]
     os.makedirs(cache_dir, exist_ok=True)
-    cache_path = _get_cache_dir(dataset_name, model_name, cache_dir)
+    cache_path = _get_cache_dir(dataset_name, model_name, cache_dir, dtype)
 
     documents, queries, qrels = _load_raw(config)
     doc_ids = [doc["id"] for doc in documents]
     query_ids = list(queries.keys())
 
     if not force_encode and cache_exists(cache_path):
-        print(f"[lotte] Loading cached embeddings: {cache_path}")
+        print(f"[lotte] Loading cached embeddings ({dtype}): {cache_path}")
         doc_embeddings, query_embeddings = load_embeddings(cache_path)
     else:
-        print(f"[lotte] Encoding {dataset_name} with {model_name} ...")
+        print(f"[lotte] Encoding {dataset_name} with {model_name} ({dtype}) on {device or 'auto'} ...")
         doc_embeddings, query_embeddings = _encode(
             documents, queries, model_name, config["query_length"], doc_length,
+            device=device, batch_size=batch_size,
         )
-        save_embeddings(cache_path, doc_embeddings, query_embeddings)
+        save_embeddings(cache_path, doc_embeddings, query_embeddings, dtype)
         print(f"[lotte] Cached to {cache_path}")
 
     return LoTTEDataset(

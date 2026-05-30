@@ -152,9 +152,10 @@ output/
 evaluation_datasets/
 ./datasets/
 
-# experiments data (raw datasets, embedding caches, benchmark results)
+# experiments data (raw datasets, embedding caches, indexes, benchmark results)
 experiments/data/evaluation_datasets/
 experiments/data/embeddings_cache/
+experiments/data/indexes/
 experiments/results/
 
 *.csv
