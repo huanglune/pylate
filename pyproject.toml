@@ -24,6 +24,31 @@ dependencies = [
     "ninja == 1.11.1.4",
     "fastkmeans == 0.5.0",
     "fast-plaid>=1.4.6.270,<=1.4.6.2110",
+
+    # dev
+    "ruff >= 0.4.9",
+    "pytest-cov >= 5.0.0",
+    "pytest-xdist >=3.6.0",
+    "pytest-rerunfailures >= 15.0.0",
+    "pytest >= 8.2.1",
+    "pandas >= 2.2.1",
+    "einops>=0.8.1",
+    "pre-commit>=4.1.0",
+    "ranx >= 0.3.16",
+    "beir >= 2.0.0",
+    "fastapi >= 0.114.1",
+    "uvicorn >= 0.30.6",
+    "batched >= 0.1.2",
+    "typos >= 0.11.0",
+
+    # eval
+    "ranx >= 0.3.16", "beir >= 2.0.0",
+
+    # api
+    "fastapi >= 0.114.1", "uvicorn >= 0.30.6", "batched >= 0.1.2",
+
+    # warp
+    "xtr-warp-rs == 2.0.3.*"
 ]
 keywords = []
 

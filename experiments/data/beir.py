@@ -124,6 +124,11 @@ def _load_raw(dataset_name: str, config: dict) -> tuple[list, dict, dict]:
             out_dir=DEFAULT_DATA_DIR,
         )
 
+    # BEIR zips sometimes nest: out_dir/name/name/corpus.jsonl
+    nested = os.path.join(data_path, dataset_name)
+    if not os.path.exists(os.path.join(data_path, "corpus.jsonl")) and os.path.isdir(nested):
+        data_path = nested
+
     documents, queries, qrels = GenericDataLoader(data_folder=data_path).load(
         split=config["split"],
     )
