@@ -22,8 +22,9 @@ Options:
     --override   Force rebuild index even if it already exists (default: reuse)
 
 Available indexes:
-    plaid       IVF+PQ, centroid interaction (CIKM 2022). Retriever: ColBERT MaxSim.
-    warp        IVF+PQ, implicit decompression (SIGIR 2025). Retriever: XTR imputation.
+    plaid           FastPLAID (Rust), default PLAID backend. Retriever: ColBERT MaxSim.
+    plaid-original  Original Stanford PLAID (Python). Same algorithm, slower implementation.
+    warp            IVF+PQ, implicit decompression (SIGIR 2025). Retriever: XTR imputation.
 
 Available datasets:
     BEIR:  nfcorpus, scifact, arguana, scidocs, fiqa, trec-covid,
@@ -70,6 +71,15 @@ def build_index_and_retriever(
             show_progress=False,
         )
         retriever = retrieve.ColBERT(index=index)
+    elif index_type == "plaid-original":
+        index = indexes.PLAID(
+            index_folder=INDEX_DIR,
+            index_name=index_name,
+            override=override,
+            show_progress=False,
+            use_fast=False,
+        )
+        retriever = retrieve.ColBERT(index=index)
     elif index_type == "warp":
         index = indexes.WARP(
             index_folder=INDEX_DIR,
@@ -79,7 +89,7 @@ def build_index_and_retriever(
         )
         retriever = retrieve.XTR(index=index)
     else:
-        raise ValueError(f"Unknown index type: {index_type!r}. Use 'plaid' or 'warp'.")
+        raise ValueError(f"Unknown index type: {index_type!r}. Use 'plaid', 'plaid-original', or 'warp'.")
     return index, retriever
 
 
